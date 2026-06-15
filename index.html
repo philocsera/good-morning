@@ -15,20 +15,8 @@ body{background:var(--bg);color:var(--ink);font-family:system-ui,'Pretendard','A
 #bar button:disabled{opacity:.28;cursor:default}
 #date{font-weight:700;font-size:15px;letter-spacing:.02em;min-width:150px;text-align:center;font-variant-numeric:tabular-nums}
 #count{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:54px}
-#lock{position:absolute;right:12px;display:flex;gap:4px}
-#lock button{border:none;padding:4px 7px;font-size:13px;opacity:.7}
 #frame{flex:1 1 auto;width:100%;border:0;background:var(--bg)}
 #msg{flex:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;padding:20px;text-align:center}
-#overlay{position:fixed;inset:0;background:rgba(20,18,12,.5);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;z-index:10}
-#card{background:var(--paper);border:2px solid var(--ink);padding:28px 30px;width:min(380px,90vw);text-align:center}
-#card h1{font-size:26px;font-weight:800;letter-spacing:-.025em;margin-bottom:4px}
-#card h1 em{color:var(--accent);font-style:normal}
-#card p{font-size:12.5px;color:var(--muted);margin-bottom:18px;line-height:1.5}
-#err{color:var(--accent);font-size:12px;min-height:16px;margin-bottom:6px;font-weight:600}
-#pass{width:100%;font-family:inherit;font-size:16px;padding:10px 12px;border:1px solid var(--rule);background:var(--bg);color:var(--ink);margin-bottom:12px}
-#pass:focus{outline:none;border-color:var(--accent)}
-#card label{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);justify-content:center;margin-bottom:16px;cursor:pointer}
-#unlock{width:100%;font-family:inherit;font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:11px;background:var(--ink);color:var(--paper);border:0;cursor:pointer}
 .hidden{display:none!important}
 </style>
 </head>
@@ -38,41 +26,24 @@ body{background:var(--bg);color:var(--ink);font-family:system-ui,'Pretendard','A
   <span id="date">—</span>
   <button id="next" title="다음 날 (→)">›</button>
   <span id="count"></span>
-  <span id="lock"><button id="forget" title="잠금 / 비밀번호 잊기">🔒</button></span>
 </div>
 <iframe id="frame" class="hidden" title="Good Morning"></iframe>
-<div id="msg" class="hidden"></div>
-
-<div id="overlay">
-  <div id="card">
-    <h1>Good <em>Morning</em></h1>
-    <p>이 아카이브는 암호화돼 있습니다.<br>비밀번호를 입력하세요.</p>
-    <div id="err"></div>
-    <input id="pass" type="password" autocomplete="current-password" placeholder="비밀번호">
-    <label><input id="remember" type="checkbox" checked> 이 기기에서 기억</label>
-    <button id="unlock">열기</button>
-  </div>
-</div>
+<div id="msg">불러오는 중…</div>
 
 <script>
 const $=s=>document.querySelector(s);
-const b64dec=b=>Uint8Array.from(atob(b),c=>c.charCodeAt(0));
-let CFG=null, DATES=[], idx=0, KEY=null;
+let DATES=[], idx=0;
 
-async function deriveKey(pass){
-  const base=await crypto.subtle.importKey('raw',new TextEncoder().encode(pass),'PBKDF2',false,['deriveKey']);
-  return crypto.subtle.deriveKey(
-    {name:'PBKDF2',salt:b64dec(CFG.salt),iterations:CFG.iterations,hash:'SHA-256'},
-    base,{name:'AES-GCM',length:256},false,['decrypt']);
-}
 async function loadDay(date){
-  const res=await fetch('d/'+date+'.enc',{cache:'no-cache'});
+  const res=await fetch('d/'+date+'.html.gz',{cache:'no-cache'});
   if(!res.ok) throw new Error('missing');
   const buf=new Uint8Array(await res.arrayBuffer());
-  const iv=buf.slice(0,12), ct=buf.slice(12);
-  const gz=await crypto.subtle.decrypt({name:'AES-GCM',iv},KEY,ct); // throws on wrong key
-  const stream=new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'));
-  return await new Response(stream).text();
+  // gzip magic 1f 8b -> decompress in-browser; otherwise the server already decoded it.
+  if(buf[0]===0x1f && buf[1]===0x8b){
+    const stream=new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return await new Response(stream).text();
+  }
+  return new TextDecoder().decode(buf);
 }
 function fmtDate(d){
   const [y,m,da]=d.split('-').map(Number);
@@ -101,35 +72,17 @@ $('#next').onclick=()=>go(1);
 window.addEventListener('keydown',keyNav);
 let tx=0; addEventListener('touchstart',e=>tx=e.touches[0].clientX,{passive:true});
 addEventListener('touchend',e=>{const dx=e.changedTouches[0].clientX-tx; if(Math.abs(dx)>60)go(dx>0?-1:1);},{passive:true});
-$('#forget').onclick=()=>{ localStorage.removeItem('gm_pass'); KEY=null; $('#overlay').classList.remove('hidden'); $('#pass').value=''; $('#pass').focus(); };
-
-async function tryUnlock(pass,remember){
-  $('#err').textContent='';
-  KEY=await deriveKey(pass);
-  idx=DATES.length-1;
-  const h=location.hash.replace('#','');
-  if(DATES.includes(h)) idx=DATES.indexOf(h);
-  try{ await loadDay(DATES[idx]); }
-  catch(e){ KEY=null; $('#err').textContent='비밀번호가 올바르지 않습니다.'; return false; }
-  if(remember) localStorage.setItem('gm_pass',pass); else localStorage.removeItem('gm_pass');
-  $('#overlay').classList.add('hidden');
-  await render();
-  return true;
-}
-$('#unlock').onclick=()=>tryUnlock($('#pass').value,$('#remember').checked);
-$('#pass').addEventListener('keydown',e=>{ if(e.key==='Enter')$('#unlock').click(); });
 
 (async function init(){
   try{
-    CFG=await (await fetch('config.json',{cache:'no-cache'})).json();
     const man=await (await fetch('manifest.json',{cache:'no-cache'})).json();
     DATES=(man.dates||[]).slice().sort();
-  }catch(e){ document.body.innerHTML='<div id="msg" style="margin:auto;color:#6b5f4b">설정을 불러오지 못했습니다.</div>'; return; }
-  if(!DATES.length){ $('#overlay').classList.add('hidden'); showMsg('아직 게시된 브리핑이 없습니다.'); return; }
-  const saved=localStorage.getItem('gm_pass');
-  if(saved && await tryUnlock(saved,true)) return;
-  localStorage.removeItem('gm_pass');
-  $('#overlay').classList.remove('hidden'); $('#pass').focus();
+  }catch(e){ showMsg('목록을 불러오지 못했습니다.'); return; }
+  if(!DATES.length){ showMsg('아직 게시된 브리핑이 없습니다.'); return; }
+  idx=DATES.length-1;
+  const h=location.hash.replace('#','');
+  if(DATES.includes(h)) idx=DATES.indexOf(h);
+  render();
 })();
 </script>
 </body>
